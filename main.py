@@ -1,17 +1,21 @@
 import logging
 import re
+import asyncio
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
 
-# --- CONFIGURATION ---
-BOT_TOKEN = '8313111297:AAH8w2GmI-f5fH4RW4OuzTnM8ccZ0vQ5kjA'
-TARGET_GROUP_ID = -5062087509
+# --- CONFIG ---
+BOT_TOKENS = [
+    '8455562528:AAEfkSpC_KtI4Tsoo0RcrNvKrHvdSOvSWno', # Bot 1
+    '8455721076:AAHsNKHGXoahBe-obVEbNuKmeq7hPKc8xBg',  # Bot 2
+    '8189270719:AAEU5ko6FDeqAnXsqertY5QPIA-rxd0OTHk',  # Bot 3
+    '8297368951:AAGFlqhn2MGq0p7XJ3mP188yeXtCjUjqLDY',
+]
 
-# --- LOGGING SETUP ---
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+TARGET_GROUP_ID = -1003324702130 
+
+logging.basicConfig(level=logging.INFO)
+
 
 # --- BLOCK RULES ---
 def is_blocked(text: str):
@@ -19,129 +23,112 @@ def is_blocked(text: str):
         return False
 
     text = text.lower()
-
-    # ❌ block usernames
-    if "@" in text:
-        return True
-
-    # ❌ block phone numbers (10 digits)
-    if re.search(r"\b\d{10}\b", text):
-        return True
-
-    # ❌ block banned words
-    banned_words = ["fuck", "idiot", "nude", "sex"]
-    if any(word in text for word in banned_words):
-        return True
-
+    if "@" in text: return True
+    if re.search(r"\b\d{10}\b", text): return True
+    if any(w in text for w in ["fuck", "idiot", "nude", "sex"]): return True
     return False
 
 
-# ============================================================
-#  NEW FEATURE: HANDLE MESSAGES IN GROUP TAGGING THE BOT
-# ============================================================
+# --- GROUP TAG HANDLER ---
 async def handle_group_tag(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bot = await context.bot.get_me()
     bot_username = bot.username.lower()
 
+    # Only handle messages in your group
     if update.effective_chat.id != TARGET_GROUP_ID:
         return
 
     message = update.message
-    user = update.effective_user
+    raw = ((message.text or "") + " " + (message.caption or "")).lower()
 
-    # --- FIX: detect tag in BOTH text and caption ---
-    raw_text = (message.text or "") + " " + (message.caption or "")
-    raw_text = raw_text.lower()
-
-    if f"@{bot_username}" not in raw_text:
+    if f"@{bot_username}" not in raw:
         return
 
-    # Clean unwanted bot tag from text/caption
-    cleaned_text = raw_text.replace(f"@{bot_username}", "").strip()
-
-    # --------------------------------------
-    #   1️⃣ Handle photos
-    # --------------------------------------
+    # --- HANDLE PHOTOS ---
     if message.photo:
         await context.bot.send_photo(
-            chat_id=user.id,
+            chat_id=update.effective_user.id,
             photo=message.photo[-1].file_id,
-            caption="📸 Completed Request: (Your photo)"
+            caption=f"📸 Completed Request"
         )
         return
 
-    # --------------------------------------
-    #   2️⃣ Handle links
-    # --------------------------------------
+    # --- HANDLE LINKS & SEND ACTUAL URL ---
     if message.entities:
-        for entity in message.entities:
-            if entity.type in ["url", "text_link"]:
+        for ent in message.entities:
+            if ent.type == "url":
+                url = message.text[ent.offset : ent.offset + ent.length]
                 await context.bot.send_message(
-                    chat_id=user.id,
-                    text=f"📩 Completed Request:\n\n{cleaned_text}"
+                    chat_id=update.effective_user.id,
+                    text=f"📩 Completed Request:\n\n{url}"
                 )
                 return
 
-    # --------------------------------------
-    #  🚫 Invalid content → reply IN GROUP
-    # --------------------------------------
+            if ent.type == "text_link":
+                await context.bot.send_message(
+                    chat_id=update.effective_user.id,
+                    text=f"📩 Completed Request:\n\n{ent.url}"
+                )
+                return
+
+    # If neither link nor photo
     await context.bot.send_message(
         chat_id=TARGET_GROUP_ID,
         text="⚠️ please send only links or photos."
     )
 
-# ============================================================
-#   EXISTING FEATURE: USER → GROUP FORWARDING
-# ============================================================
+
+# --- PRIVATE → GROUP FORWARD ---
 async def forward_to_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    if update.effective_chat.type == 'private':
-        user = update.effective_user
-        message = update.message.text or ""
+    if update.effective_chat.type != 'private':
+        return
 
-        # --- 1️⃣ BLOCK CHECK ---
-        if is_blocked(message):
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text="⚠️ Your message contains restricted content and cannot be sent."
-            )
-            return
+    text = update.message.text or ""
+    if is_blocked(text):
+        await context.bot.send_message(update.effective_chat.id,
+                                       "⚠️ Your message contains restricted content.")
+        return
 
-        try:
-            logging.info(f"Received message from {user.first_name} ({user.id})")
+    await context.bot.copy_message(
+        chat_id=TARGET_GROUP_ID,
+        from_chat_id=update.effective_chat.id,
+        message_id=update.message.message_id
+    )
 
-            # Forward allowed message to group
-            await context.bot.copy_message(
-                chat_id=TARGET_GROUP_ID,
-                from_chat_id=update.effective_chat.id,
-                message_id=update.message.message_id
-            )
-
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text="We are monitoring your request and guiding it to completion"
-            )
-
-        except Exception as e:
-            logging.error(f"Error forwarding message: {e}")
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text="Sorry, an error occurred while sending your message."
-            )
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text="We are monitoring your request..."
+    )
 
 
+# --- MULTI-BOT MAIN ---
+async def run_bot(token):
+    app = ApplicationBuilder().token(token).build()
 
-# ============================================================
-#                        MAIN
-# ============================================================
-if __name__ == '__main__':
-    application = ApplicationBuilder().token(BOT_TOKEN).build()
+    app.add_handler(MessageHandler(filters.ChatType.GROUPS, handle_group_tag))
+    app.add_handler(MessageHandler(filters.ALL & (~filters.COMMAND), forward_to_group))
 
-    # Handler for group tags → private chat
-    application.add_handler(MessageHandler(filters.ChatType.GROUPS, handle_group_tag))
+    await app.initialize()
+    await app.start()
 
-    # Handler for private chat messages → group forwarding
-    application.add_handler(MessageHandler(filters.ALL & (~filters.COMMAND), forward_to_group))
+    # Start polling WITHOUT await (so multiple bots can run)
+    asyncio.create_task(app.updater.start_polling())
 
-    print("Bot is running...")
-    application.run_polling()
+    bot = await app.bot.get_me()
+    print(f"✅ Started bot: @{bot.username}")
+
+    return app
+
+
+async def main():
+    print(f"Launching {len(BOT_TOKENS)} bots...\n")
+
+    apps = [await run_bot(token) for token in BOT_TOKENS]
+
+    # Keep alive forever
+    await asyncio.Event().wait()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
